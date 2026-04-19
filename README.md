@@ -1,4 +1,4 @@
-# sip_uri
+# tsip-parser
 
 Pure-Rust SIP URI (RFC 3261 §19.1) and SIP Address (§25.1) parser/serializer.
 
@@ -19,11 +19,11 @@ No external dependencies, no `unsafe` blocks.
 
 ```toml
 [dependencies]
-sip_uri = "0.1"
+tsip-parser = "0.1"
 ```
 
 ```rust
-use sip_uri::{Address, Uri};
+use tsip_parser::{Address, Uri};
 
 let uri = Uri::parse("sip:alice@atlanta.example.com;transport=tcp").unwrap();
 assert_eq!(uri.scheme, "sip");

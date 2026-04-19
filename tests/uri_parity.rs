@@ -1,4 +1,4 @@
-use sip_uri::{ParseError, Uri};
+use tsip_parser::{ParseError, Uri};
 
 fn get_param<'a>(uri: &'a Uri, key: &str) -> Option<&'a str> {
     uri.params

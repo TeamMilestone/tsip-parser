@@ -1,4 +1,9 @@
-# sip_uri_crate 구현 핸드오버
+# tsip-parser 구현 핸드오버
+
+> 2026-04-19: 최종 공개 이름은 `tsip-parser`(crates.io) / `TeamMilestone/tsip-parser`(GitHub).
+> 아래 본문에서 작업 중 임시로 쓰인 `sip_uri` / `sip_uri_crate` 명칭은 이 이름으로
+> 읽어주세요. 경로 레이아웃 예시도 `tsip-parser/` 로 치환됩니다.
+
 
 작성일: 2026-04-19. 목적: tsip-core 의 `lib/tsip_core/sip/uri.rb` +
 `lib/tsip_core/sip/address.rb` 파싱/직렬화 로직을 pure-Rust 크레이트로 포팅.

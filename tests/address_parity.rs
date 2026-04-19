@@ -1,4 +1,4 @@
-use sip_uri::Address;
+use tsip_parser::Address;
 
 #[test]
 fn name_addr_quoted() {
@@ -57,7 +57,7 @@ fn name_addr_params_all_belong_to_address() {
 #[test]
 fn unterminated_angle_errors() {
     let err = Address::parse("<sip:alice@host").unwrap_err();
-    assert_eq!(err, sip_uri::ParseError::UnterminatedAngle);
+    assert_eq!(err, tsip_parser::ParseError::UnterminatedAngle);
 }
 
 #[test]

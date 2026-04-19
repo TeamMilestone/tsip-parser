@@ -1,4 +1,4 @@
-use sip_uri::{Address, Uri};
+use tsip_parser::{Address, Uri};
 
 const URI_CASES: &[&str] = &[
     "sip:alice@atlanta.example.com",

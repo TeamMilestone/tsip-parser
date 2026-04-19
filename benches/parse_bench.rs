@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use sip_uri::{Address, Uri};
+use tsip_parser::{Address, Uri};
 
 const TYPICAL_URI: &str = "sip:alice@atlanta.example.com;transport=tcp";
 const COMPLEX_URI: &str = "sip:alice:pw@[2001:db8::1]:5060;transport=tcp;lr?subject=hi&priority=u";

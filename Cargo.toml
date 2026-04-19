@@ -1,5 +1,5 @@
 [package]
-name = "sip_uri"
+name = "tsip-parser"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
@@ -7,6 +7,8 @@ authors = ["Wonsup Lee <alfonso@team-milestone.io>"]
 description = "RFC 3261 SIP URI (§19.1) and Address (§25.1) parser/serializer"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/TeamMilestone/tsip-parser"
+homepage = "https://github.com/TeamMilestone/tsip-parser"
 keywords = ["sip", "parser", "telephony"]
 categories = ["parser-implementations", "network-programming"]
 

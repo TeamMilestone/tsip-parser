@@ -167,6 +167,72 @@ fn nil_like_parse_error_variant_exists() {
 }
 
 #[test]
+fn accepts_pct_encoded_at_in_user() {
+    let u = Uri::parse("sip:%40alice@host").unwrap();
+    assert_eq!(u.user.as_deref(), Some("@alice"));
+    // literal @ in stored user must be re-escaped on render so the round-trip
+    // reaches a fixed point.
+    assert_eq!(u.to_string(), "sip:%40alice@host");
+}
+
+#[test]
+fn accepts_literal_pct_in_user() {
+    let u = Uri::parse("sip:al%25ice@host").unwrap();
+    assert_eq!(u.user.as_deref(), Some("al%ice"));
+    assert_eq!(u.to_string(), "sip:al%25ice@host");
+}
+
+#[test]
+fn preserves_leading_ws_in_param_value() {
+    let u = Uri::parse("sip:alice@host;transport= TCP").unwrap();
+    assert_eq!(u.params, vec![("transport".into(), " TCP".into())]);
+    assert_eq!(u.to_string(), "sip:alice@host;transport= TCP");
+}
+
+#[test]
+fn preserves_leading_ws_in_header_value() {
+    let u = Uri::parse("sip:alice@host?key= val").unwrap();
+    assert_eq!(u.headers, vec![("key".into(), " val".into())]);
+    // Header values are pct-decoded on parse, so the stored leading space must
+    // be escaped on render to survive round-trip (outer segment trim_ws would
+    // strip it otherwise). Re-parsing %20 restores the leading space.
+    assert_eq!(u.to_string(), "sip:alice@host?key=%20val");
+    let re = Uri::parse(&u.to_string()).unwrap();
+    assert_eq!(re.headers, u.headers);
+}
+
+#[test]
+fn escapes_pct_decoded_cr_in_header_key() {
+    // Fuzz regression: `?%0D` decoded to key "\r", which lost round-trip
+    // before header-side escape was added. The renderer must escape the CR.
+    let u = Uri::parse("?%0D").unwrap();
+    assert_eq!(u.headers, vec![("\r".into(), "".into())]);
+    let rendered = u.to_string();
+    let re = Uri::parse(&rendered).unwrap();
+    assert_eq!(re.to_string(), rendered);
+}
+
+#[test]
+fn accepts_lt_but_rejects_gt_in_param_key() {
+    // `<` in a param key is permissive — it survives round-trip even when the
+    // URI is wrapped in `<...>` by an Address, because the scanner still finds
+    // the true closing `>` afterwards.
+    let u = Uri::parse("sip:alice@host;<foo=1").unwrap();
+    assert_eq!(u.params, vec![("<foo".into(), "1".into())]);
+
+    // `>` in a param key/value is rejected: a stored `>` would terminate the
+    // `<...>` wrapper prematurely on Address re-parse, breaking round-trip.
+    assert_eq!(
+        Uri::parse("sip:alice@host;foo>=1").unwrap_err(),
+        ParseError::InvalidHost
+    );
+    assert_eq!(
+        Uri::parse("sip:alice@host;foo=>").unwrap_err(),
+        ParseError::InvalidHost
+    );
+}
+
+#[test]
 fn duplicate_param_keys_overwrite_in_place() {
     // Ruby Hash assignment overwrites without reordering — mirror that.
     let u = Uri::parse("sip:a@h;tag=one;x=y;tag=two").unwrap();

@@ -5,8 +5,8 @@
 //! parsed without an extra allocation.
 
 use crate::error::ParseError;
-use crate::scan::{self, downcase_str, slice_str, DQUOTE, EQ_, GT, LT, SEMI};
-use crate::uri::{parse_param_range, validate_param_key, validate_param_value, Uri};
+use crate::scan::{self, downcase_str, slice_str, DQUOTE, EQ_, GT, LT, QMARK, SEMI};
+use crate::uri::{parse_param_range, Uri};
 
 /// Params that sit at the Address level rather than being folded into the
 /// embedded URI. Must stay in sync with `Address::ADDRESS_PARAMS` in
@@ -217,19 +217,27 @@ fn classify_bare_param(
 
     let key = downcase_str(input, k_from, k_to);
     let val = match eq {
-        Some(e) => {
-            let (v_from, v_to) = scan::trim_ws(src, e + 1, to);
-            slice_str(input, v_from, v_to)
-        }
+        Some(e) => slice_str(input, e + 1, to),
         None => String::new(),
     };
 
-    validate_param_key(&key)?;
-    validate_param_value(&val)?;
+    // Any stored `>` prematurely terminates the Address `<...>` wrapper on
+    // re-parse. Applies to both URI-embedded and Address-level params because
+    // parse_param_range (used by the angle-path re-parser for both levels)
+    // rejects `>`.
+    if key.as_bytes().contains(&GT) || val.as_bytes().contains(&GT) {
+        return Err(ParseError::InvalidHost);
+    }
 
     if ADDRESS_PARAMS.contains(&key.as_str()) {
         upsert(params, key, val);
     } else {
+        // Uri-embedded params also must not contain `?` — on angle-wrap
+        // re-parse the URI body is scanned and `?` would split off as headers
+        // start. `&` is safe (URI-level scan doesn't split on it).
+        if key.as_bytes().contains(&QMARK) || val.as_bytes().contains(&QMARK) {
+            return Err(ParseError::InvalidHost);
+        }
         upsert(&mut uri.params, key, val);
     }
     Ok(())

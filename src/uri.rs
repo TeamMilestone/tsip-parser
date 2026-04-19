@@ -9,7 +9,7 @@ use std::fmt;
 use crate::error::ParseError;
 use crate::scan::{
     self, digits_only, downcase_str, parse_u16, pct_decode, slice_str, AMP, AT, COLON, EQ_, GT,
-    LBRACKET, LT, PCT, QMARK, RBRACKET, SEMI,
+    LBRACKET, LT, QMARK, RBRACKET, SEMI,
 };
 
 /// Parsed SIP or tel URI.
@@ -112,13 +112,10 @@ impl Uri {
             if let Some(c) = colon_idx {
                 let u = pct_decode(input, from, c)?;
                 let p = pct_decode(input, c + 1, at_idx)?;
-                validate_token(&u)?;
-                validate_token(&p)?;
                 user = Some(u);
                 password = Some(p);
             } else {
                 let u = pct_decode(input, from, at_idx)?;
-                validate_token(&u)?;
                 user = Some(u);
             }
             at_idx + 1
@@ -268,10 +265,10 @@ impl Uri {
         buf.push_str(self.scheme);
         buf.push(':');
         if let Some(user) = &self.user {
-            buf.push_str(user);
+            append_pct_escaped(buf, user);
             if let Some(pw) = &self.password {
                 buf.push(':');
-                buf.push_str(pw);
+                append_pct_escaped(buf, pw);
             }
             buf.push('@');
         }
@@ -296,9 +293,9 @@ impl Uri {
                     buf.push('&');
                 }
                 first = false;
-                buf.push_str(k);
+                append_pct_escaped(buf, k);
                 buf.push('=');
-                buf.push_str(v);
+                append_pct_escaped(buf, v);
             }
         }
     }
@@ -366,16 +363,21 @@ pub(crate) fn parse_param_range(
         return Ok(());
     }
     let (key, val) = if let Some(eq) = eq {
-        let (v_from, v_to) = scan::trim_ws(src, eq + 1, to);
         (
             downcase_str(input, k_from, k_to),
-            slice_str(input, v_from, v_to),
+            slice_str(input, eq + 1, to),
         )
     } else {
         (downcase_str(input, k_from, k_to), String::new())
     };
-    validate_param_key(&key)?;
-    validate_param_value(&val)?;
+    // Params are stored literally (no pct-decode), so structural bytes that
+    // would re-tokenize on re-parse must be rejected at parse time. `>` is
+    // the only byte that breaks Address wrapping (it terminates the `<...>`
+    // slice on re-parse); `<` is safe because the scanner finds the true
+    // closing `>` after it.
+    if key.as_bytes().contains(&GT) || val.as_bytes().contains(&GT) {
+        return Err(ParseError::InvalidHost);
+    }
     upsert(target, key, val);
     Ok(())
 }
@@ -408,35 +410,14 @@ fn parse_header_range(
         return Ok(());
     }
     let (key, val) = if let Some(eq) = eq {
-        let (v_from, v_to) = scan::trim_ws(src, eq + 1, to);
         (
             pct_decode(input, k_from, k_to)?,
-            pct_decode(input, v_from, v_to)?,
+            pct_decode(input, eq + 1, to)?,
         )
     } else {
         (pct_decode(input, k_from, k_to)?, String::new())
     };
-    validate_param_key(&key)?;
-    validate_param_value(&val)?;
-    validate_pct_decoded(&key)?;
-    validate_pct_decoded(&val)?;
     upsert(target, key, val);
-    Ok(())
-}
-
-/// A pct-decoded header key/value must not contain a literal `%` (re-parse
-/// would decode it again) nor leading/trailing whitespace (re-parse's
-/// `parse_header_range` trim_ws would strip them).
-fn validate_pct_decoded(s: &str) -> Result<(), ParseError> {
-    let bytes = s.as_bytes();
-    if bytes.contains(&PCT) {
-        return Err(ParseError::InvalidHost);
-    }
-    if let (Some(&first), Some(&last)) = (bytes.first(), bytes.last()) {
-        if scan::is_ws(first) || scan::is_ws(last) {
-            return Err(ParseError::InvalidHost);
-        }
-    }
     Ok(())
 }
 
@@ -532,64 +513,27 @@ fn validate_host(host: &str) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// Reject every byte in userinfo that would re-tokenize on render+re-parse.
-/// This includes Address brackets (`<`, `>`), all URI-level delimiters
-/// (`@`, `:`, `;`, `?`, `&`, `=`), and any literal `%` left over from
-/// pct-decoding — the renderer emits bytes verbatim, so the stored form must
-/// already be unambiguous. Edge whitespace is rejected for the same reason
-/// (outer trim_ws would strip it on re-parse); interior ws is tolerated.
-/// See §13 of `docs/HANDOVER.md`.
-fn validate_token(s: &str) -> Result<(), ParseError> {
-    for &b in s.as_bytes() {
-        if b == LT
-            || b == GT
-            || b == PCT
-            || b == AT
-            || b == COLON
-            || b == SEMI
-            || b == QMARK
-            || b == AMP
-            || b == EQ_
-            || b == LBRACKET
-            || b == RBRACKET
-        {
-            return Err(ParseError::InvalidHost);
-        }
-    }
-    let bytes = s.as_bytes();
-    if let (Some(&first), Some(&last)) = (bytes.first(), bytes.last()) {
-        if scan::is_ws(first) || scan::is_ws(last) {
-            return Err(ParseError::InvalidHost);
-        }
-    }
-    Ok(())
-}
+const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
 
-/// Param/header keys must not contain any structural byte that would re-split
-/// the key/value pair or the wider param/header list on re-parse.
-pub(crate) fn validate_param_key(s: &str) -> Result<(), ParseError> {
-    for &b in s.as_bytes() {
-        if b == LT
-            || b == GT
-            || b == SEMI
-            || b == QMARK
-            || b == AMP
-            || b == EQ_
-            || b == AT
-        {
-            return Err(ParseError::InvalidHost);
+/// Escape bytes of a pct-decoded field (userinfo, header key/value) so that
+/// render+re-parse reaches a fixed point. Covers Address brackets, URI-level
+/// delimiters, literal `%` (re-parse would decode it again), and whitespace
+/// (edge ws would be stripped by outer trim_ws on re-parse; interior ws is
+/// escaped conservatively).
+fn append_pct_escaped(buf: &mut String, src: &str) {
+    // Iterate chars so non-ASCII codepoints round-trip as their original UTF-8
+    // bytes (writing `b as char` would reinterpret the byte as a Unicode
+    // codepoint and re-encode it, corrupting multibyte sequences).
+    for ch in src.chars() {
+        match ch {
+            '@' | ':' | ';' | '?' | '<' | '>' | '%' | '&' | '='
+            | ' ' | '\t' | '\r' | '\n' => {
+                let b = ch as u8;
+                buf.push('%');
+                buf.push(HEX_UPPER[(b >> 4) as usize] as char);
+                buf.push(HEX_UPPER[(b & 0x0F) as usize] as char);
+            }
+            _ => buf.push(ch),
         }
     }
-    Ok(())
-}
-
-/// Param/header values may contain `=` (only one `=` separates key from value,
-/// any remainder is part of the value), but must not contain list delimiters.
-pub(crate) fn validate_param_value(s: &str) -> Result<(), ParseError> {
-    for &b in s.as_bytes() {
-        if b == LT || b == GT || b == SEMI || b == QMARK || b == AMP {
-            return Err(ParseError::InvalidHost);
-        }
-    }
-    Ok(())
 }

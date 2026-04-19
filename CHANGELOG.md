@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0 — 2026-04-19
+
+### Added
+
+- `message` module with `Message::parse(&[u8]) -> Result<Message, ParseError>`
+  for RFC 3261 SIP message framing. Returns `StartLine` (`Request` or
+  `Response`), `Vec<(canonical_name, raw_value)>` headers preserving insertion
+  order and duplicates, and `Vec<u8>` body. Compact header forms
+  (`v`, `f`, `t`, `i`, `m`, `c`, `l`, ...) are mapped to canonical names.
+  Line folding per §7.3.1 joins continuation lines with a single SP.
+  `Content-Length` is validated (negative / non-numeric / oversize rejected)
+  and used to truncate an oversized raw body; a short body is kept verbatim
+  (transport-layer concern).
+- `Message::content_length()` and `Message::header(canonical)` convenience
+  accessors.
+- `ParseError` variants: `MessageTooLarge`, `EmptyMessage`, `InvalidStartLine`,
+  `InvalidStatusCode`, `HeaderMissingColon`, `NegativeContentLength`,
+  `OversizeContentLength`, `BadContentLength`.
+- Re-exports at the crate root: `Message`, `StartLine`.
+
+### Internal
+
+- `Message::MAX_SIZE = 65_536`. Inputs above the cap are rejected with
+  `MessageTooLarge`. `Content-Length` above the cap yields
+  `OversizeContentLength`.
+- Canonical header lookup is stateless: 1-byte compact map, then an ASCII
+  case-insensitive scan of 37 well-known names, then `capitalize_dashed`
+  allocation as the fallback.
+- Tests: 28 good corpus + 20 malformed corpus (`tests/message_parity.rs`).
+- Fuzz target `message`: 4.78M runs / 30s / panic=0 (local smoke).
+- Bench (`benches/message_bench.rs`): INVITE 10-header ≈ 1.48 μs;
+  response 200 ≈ 1.03 μs; compact-form INVITE ≈ 1.06 μs.
+
 ## 0.2.1 — 2026-04-19
 
 ### Fixed

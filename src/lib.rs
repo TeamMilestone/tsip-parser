@@ -6,9 +6,11 @@
 
 pub mod address;
 pub mod error;
+pub mod message;
 pub mod scan;
 pub mod uri;
 
 pub use address::{Address, ADDRESS_PARAMS};
 pub use error::ParseError;
+pub use message::{Message, StartLine};
 pub use uri::Uri;

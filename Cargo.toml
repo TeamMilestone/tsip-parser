@@ -1,6 +1,6 @@
 [package]
 name = "tsip-parser"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 authors = ["Wonsup Lee <alfonso@team-milestone.io>"]
@@ -19,6 +19,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "parse_bench"
+harness = false
+
+[[bench]]
+name = "message_bench"
 harness = false
 
 [profile.release]

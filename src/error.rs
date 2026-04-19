@@ -8,6 +8,7 @@ pub enum ParseError {
     UnterminatedAngle,
     InvalidScheme,
     InvalidUtf8,
+    InvalidHost,
 }
 
 impl fmt::Display for ParseError {
@@ -19,6 +20,7 @@ impl fmt::Display for ParseError {
             ParseError::UnterminatedAngle => f.write_str("unterminated '<' in address"),
             ParseError::InvalidScheme => f.write_str("invalid SIP URI scheme"),
             ParseError::InvalidUtf8 => f.write_str("pct-decoded bytes are not valid UTF-8"),
+            ParseError::InvalidHost => f.write_str("host contains forbidden character"),
         }
     }
 }

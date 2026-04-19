@@ -8,8 +8,8 @@ use std::fmt;
 
 use crate::error::ParseError;
 use crate::scan::{
-    self, digits_only, downcase_str, parse_u16, pct_decode, slice_str, AMP, AT, COLON, EQ_,
-    LBRACKET, QMARK, RBRACKET, SEMI,
+    self, digits_only, downcase_str, parse_u16, pct_decode, slice_str, AMP, AT, COLON, EQ_, GT,
+    LBRACKET, LT, PCT, QMARK, RBRACKET, SEMI,
 };
 
 /// Parsed SIP or tel URI.
@@ -110,17 +110,23 @@ impl Uri {
                 k += 1;
             }
             if let Some(c) = colon_idx {
-                user = Some(pct_decode(input, from, c)?);
-                password = Some(pct_decode(input, c + 1, at_idx)?);
+                let u = pct_decode(input, from, c)?;
+                let p = pct_decode(input, c + 1, at_idx)?;
+                validate_token(&u)?;
+                validate_token(&p)?;
+                user = Some(u);
+                password = Some(p);
             } else {
-                user = Some(pct_decode(input, from, at_idx)?);
+                let u = pct_decode(input, from, at_idx)?;
+                validate_token(&u)?;
+                user = Some(u);
             }
             at_idx + 1
         } else {
             from
         };
 
-        let (host, port) = parse_host_port_range(input, host_start, uh_end);
+        let (host, port) = parse_host_port_range(input, host_start, uh_end)?;
 
         let mut params: Vec<(String, String)> = if params_cap > 0 {
             Vec::with_capacity(params_cap)
@@ -139,7 +145,7 @@ impl Uri {
                     }
                     k += 1;
                 }
-                parse_param_range(input, seg_start, seg_end, &mut params);
+                parse_param_range(input, seg_start, seg_end, &mut params)?;
                 if seg_end == body_end {
                     break;
                 }
@@ -331,11 +337,13 @@ pub(crate) fn parse_param_range(
     from: usize,
     to: usize,
     target: &mut Vec<(String, String)>,
-) {
+) -> Result<(), ParseError> {
     let src = input.as_bytes();
-    let (from, to) = scan::trim_sp_tab(src, from, to);
+    // Full ws trim (not just SP/HTAB) at the segment level first, so CR/LF-only
+    // segments are skipped. See §13 of HANDOVER.md.
+    let (from, to) = scan::trim_ws(src, from, to);
     if from == to {
-        return;
+        return Ok(());
     }
     let mut eq = None;
     let mut j = from;
@@ -346,14 +354,30 @@ pub(crate) fn parse_param_range(
         }
         j += 1;
     }
-    if let Some(eq) = eq {
-        let key = downcase_str(input, from, eq);
-        let val = slice_str(input, eq + 1, to);
-        upsert(target, key, val);
-    } else {
-        let key = downcase_str(input, from, to);
-        upsert(target, key, String::new());
+    // Trim ws from the key and value ranges separately. Trailing ws in a key
+    // (e.g. input `;P =;` → key `"P "`) would be stripped on re-parse because
+    // the outer `Uri::parse` trim_ws strips trailing ws from the *whole* URI;
+    // matching that here keeps the fixed point.
+    let (k_from, k_to) = match eq {
+        Some(eq) => scan::trim_ws(src, from, eq),
+        None => (from, to),
+    };
+    if k_from == k_to {
+        return Ok(());
     }
+    let (key, val) = if let Some(eq) = eq {
+        let (v_from, v_to) = scan::trim_ws(src, eq + 1, to);
+        (
+            downcase_str(input, k_from, k_to),
+            slice_str(input, v_from, v_to),
+        )
+    } else {
+        (downcase_str(input, k_from, k_to), String::new())
+    };
+    validate_param_key(&key)?;
+    validate_param_value(&val)?;
+    upsert(target, key, val);
+    Ok(())
 }
 
 fn parse_header_range(
@@ -363,6 +387,10 @@ fn parse_header_range(
     target: &mut Vec<(String, String)>,
 ) -> Result<(), ParseError> {
     let src = input.as_bytes();
+    let (from, to) = scan::trim_ws(src, from, to);
+    if from == to {
+        return Ok(());
+    }
     let mut eq = None;
     let mut j = from;
     while j < to {
@@ -372,13 +400,42 @@ fn parse_header_range(
         }
         j += 1;
     }
-    if let Some(eq) = eq {
-        let key = pct_decode(input, from, eq)?;
-        let val = pct_decode(input, eq + 1, to)?;
-        upsert(target, key, val);
+    let (k_from, k_to) = match eq {
+        Some(eq) => scan::trim_ws(src, from, eq),
+        None => (from, to),
+    };
+    if k_from == k_to {
+        return Ok(());
+    }
+    let (key, val) = if let Some(eq) = eq {
+        let (v_from, v_to) = scan::trim_ws(src, eq + 1, to);
+        (
+            pct_decode(input, k_from, k_to)?,
+            pct_decode(input, v_from, v_to)?,
+        )
     } else {
-        let key = pct_decode(input, from, to)?;
-        upsert(target, key, String::new());
+        (pct_decode(input, k_from, k_to)?, String::new())
+    };
+    validate_param_key(&key)?;
+    validate_param_value(&val)?;
+    validate_pct_decoded(&key)?;
+    validate_pct_decoded(&val)?;
+    upsert(target, key, val);
+    Ok(())
+}
+
+/// A pct-decoded header key/value must not contain a literal `%` (re-parse
+/// would decode it again) nor leading/trailing whitespace (re-parse's
+/// `parse_header_range` trim_ws would strip them).
+fn validate_pct_decoded(s: &str) -> Result<(), ParseError> {
+    let bytes = s.as_bytes();
+    if bytes.contains(&PCT) {
+        return Err(ParseError::InvalidHost);
+    }
+    if let (Some(&first), Some(&last)) = (bytes.first(), bytes.last()) {
+        if scan::is_ws(first) || scan::is_ws(last) {
+            return Err(ParseError::InvalidHost);
+        }
     }
     Ok(())
 }
@@ -395,11 +452,20 @@ fn upsert(target: &mut Vec<(String, String)>, key: String, val: String) {
     target.push((key, val));
 }
 
-fn parse_host_port_range(input: &str, from: usize, to: usize) -> (String, Option<u16>) {
-    if from == to {
-        return (String::new(), None);
-    }
+fn parse_host_port_range(
+    input: &str,
+    from: usize,
+    to: usize,
+) -> Result<(String, Option<u16>), ParseError> {
     let src = input.as_bytes();
+    // Normalize host boundary whitespace (SP/HTAB/CR/LF). The outer Uri::parse
+    // trim_ws only strips the whole-input edges; without this the parser would
+    // accept `"sip:A "` with host=`"A "`, but re-parsing the rendered output
+    // `"sip:A "` would trim to `"A"` — round-trip unstable.
+    let (from, to) = scan::trim_ws(src, from, to);
+    if from == to {
+        return Ok((String::new(), None));
+    }
     if src[from] == LBRACKET {
         let mut bracket = None;
         let mut j = from + 1;
@@ -411,19 +477,22 @@ fn parse_host_port_range(input: &str, from: usize, to: usize) -> (String, Option
             j += 1;
         }
         let Some(bracket) = bracket else {
-            return (slice_str(input, from, to), None);
+            let host = slice_str(input, from, to);
+            validate_host(&host)?;
+            return Ok((host, None));
         };
 
         let host = slice_str(input, from + 1, bracket);
+        validate_host(&host)?;
         let rem_start = bracket + 1;
         if rem_start == to {
-            return (host, None);
+            return Ok((host, None));
         }
         if src[rem_start] == COLON && digits_only(src, rem_start + 1, to) {
             let port = parse_u16(src, rem_start + 1, to);
-            return (host, port);
+            return Ok((host, port));
         }
-        return (host, None);
+        return Ok((host, None));
     }
 
     let mut last_colon = None;
@@ -439,8 +508,88 @@ fn parse_host_port_range(input: &str, from: usize, to: usize) -> (String, Option
     if let Some(lc) = last_colon {
         if digits_only(src, lc + 1, to) {
             let port = parse_u16(src, lc + 1, to);
-            return (slice_str(input, from, lc), port);
+            let host = slice_str(input, from, lc);
+            validate_host(&host)?;
+            return Ok((host, port));
         }
     }
-    (slice_str(input, from, to), None)
+    let host = slice_str(input, from, to);
+    validate_host(&host)?;
+    Ok((host, None))
+}
+
+/// Host must not carry structural bytes used by the Address wrapper (`<`, `>`)
+/// or whitespace/control bytes. Also reject `[`/`]` in the stored host — the
+/// IPv6-bracket parser strips the outer brackets before arriving here, so any
+/// remaining bracket is structural garbage that round-trip cannot preserve.
+/// See §13 of `docs/HANDOVER.md`.
+fn validate_host(host: &str) -> Result<(), ParseError> {
+    for &b in host.as_bytes() {
+        if b == LT || b == GT || b == LBRACKET || b == RBRACKET || scan::is_ws(b) {
+            return Err(ParseError::InvalidHost);
+        }
+    }
+    Ok(())
+}
+
+/// Reject every byte in userinfo that would re-tokenize on render+re-parse.
+/// This includes Address brackets (`<`, `>`), all URI-level delimiters
+/// (`@`, `:`, `;`, `?`, `&`, `=`), and any literal `%` left over from
+/// pct-decoding — the renderer emits bytes verbatim, so the stored form must
+/// already be unambiguous. Edge whitespace is rejected for the same reason
+/// (outer trim_ws would strip it on re-parse); interior ws is tolerated.
+/// See §13 of `docs/HANDOVER.md`.
+fn validate_token(s: &str) -> Result<(), ParseError> {
+    for &b in s.as_bytes() {
+        if b == LT
+            || b == GT
+            || b == PCT
+            || b == AT
+            || b == COLON
+            || b == SEMI
+            || b == QMARK
+            || b == AMP
+            || b == EQ_
+            || b == LBRACKET
+            || b == RBRACKET
+        {
+            return Err(ParseError::InvalidHost);
+        }
+    }
+    let bytes = s.as_bytes();
+    if let (Some(&first), Some(&last)) = (bytes.first(), bytes.last()) {
+        if scan::is_ws(first) || scan::is_ws(last) {
+            return Err(ParseError::InvalidHost);
+        }
+    }
+    Ok(())
+}
+
+/// Param/header keys must not contain any structural byte that would re-split
+/// the key/value pair or the wider param/header list on re-parse.
+pub(crate) fn validate_param_key(s: &str) -> Result<(), ParseError> {
+    for &b in s.as_bytes() {
+        if b == LT
+            || b == GT
+            || b == SEMI
+            || b == QMARK
+            || b == AMP
+            || b == EQ_
+            || b == AT
+        {
+            return Err(ParseError::InvalidHost);
+        }
+    }
+    Ok(())
+}
+
+/// Param/header values may contain `=` (only one `=` separates key from value,
+/// any remainder is part of the value), but must not contain list delimiters.
+pub(crate) fn validate_param_value(s: &str) -> Result<(), ParseError> {
+    for &b in s.as_bytes() {
+        if b == LT || b == GT || b == SEMI || b == QMARK || b == AMP {
+            return Err(ParseError::InvalidHost);
+        }
+    }
+    Ok(())
 }

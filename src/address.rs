@@ -6,7 +6,7 @@
 
 use crate::error::ParseError;
 use crate::scan::{self, downcase_str, slice_str, DQUOTE, EQ_, GT, LT, SEMI};
-use crate::uri::{parse_param_range, Uri};
+use crate::uri::{parse_param_range, validate_param_key, validate_param_value, Uri};
 
 /// Params that sit at the Address level rather than being folded into the
 /// embedded URI. Must stay in sync with `Address::ADDRESS_PARAMS` in
@@ -66,7 +66,7 @@ impl Address {
                 }
                 k += 1;
             }
-            parse_param_range(input, seg_start, seg_end, &mut params);
+            parse_param_range(input, seg_start, seg_end, &mut params)?;
             if seg_end == to {
                 break;
             }
@@ -106,7 +106,7 @@ impl Address {
                     }
                     k += 1;
                 }
-                classify_bare_param(input, seg_start, seg_end, &mut uri, &mut params);
+                classify_bare_param(input, seg_start, seg_end, &mut uri, &mut params)?;
                 if seg_end == to {
                     break;
                 }
@@ -190,11 +190,11 @@ fn classify_bare_param(
     to: usize,
     uri: &mut Uri,
     params: &mut Vec<(String, String)>,
-) {
+) -> Result<(), ParseError> {
     let src = input.as_bytes();
-    let (from, to) = scan::trim_sp_tab(src, from, to);
+    let (from, to) = scan::trim_ws(src, from, to);
     if from == to {
-        return;
+        return Ok(());
     }
 
     let mut eq = None;
@@ -207,17 +207,32 @@ fn classify_bare_param(
         j += 1;
     }
 
-    let key = downcase_str(input, from, eq.unwrap_or(to));
+    let (k_from, k_to) = match eq {
+        Some(eq) => scan::trim_ws(src, from, eq),
+        None => (from, to),
+    };
+    if k_from == k_to {
+        return Ok(());
+    }
+
+    let key = downcase_str(input, k_from, k_to);
     let val = match eq {
-        Some(e) => slice_str(input, e + 1, to),
+        Some(e) => {
+            let (v_from, v_to) = scan::trim_ws(src, e + 1, to);
+            slice_str(input, v_from, v_to)
+        }
         None => String::new(),
     };
+
+    validate_param_key(&key)?;
+    validate_param_value(&val)?;
 
     if ADDRESS_PARAMS.contains(&key.as_str()) {
         upsert(params, key, val);
     } else {
         upsert(&mut uri.params, key, val);
     }
+    Ok(())
 }
 
 fn upsert(target: &mut Vec<(String, String)>, key: String, val: String) {

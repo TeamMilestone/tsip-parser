@@ -527,6 +527,97 @@ pub fn parse(input: &str) -> Result<Self, ParseError> { ... }
 
 ---
 
+## 13. Fuzz round-1 finding (2026-04-19)
+
+`cargo +nightly fuzz run uri/address -- -max_total_time=60 -ignore_crashes=1`
+1회차 결과. **panic/unwrap/추상화된 assert 는 모두 0건** — `ParseError`
+비-unwrap 설계가 유효함. 수집된 crash 는 전부 **round-trip 불안정**
+(`parse → to_string → parse → to_string` 이 fixed point 에 수렴하지 않음).
+
+| target  | crashes | unique clusters | 대표 패턴 |
+|---------|---------|-----------------|-----------|
+| uri     | 175     | 94              | 후행 whitespace/control char, 중복 `;` 삽입 |
+| address | 178     | 47              | `?` 헤더 앞 `;` 삽입, 빈 헤더 `=` 삽입, 빈 param |
+
+### 4가지 root cause
+
+1. **RC1: host trailing whitespace 비대칭**
+   - `parse_host_port_range` 가 SP/HTAB/CR/LF 를 host slice 에 포함.
+   - `Uri::parse` 외곽 `trim_ws` 는 재parse 시 이 끝문자들을 잘라냄.
+   - 예: `"sip:A "` → host=`"A "` (첫 parse), `"A"` (재 parse).
+
+2. **RC2: 빈-key param/header 생성**
+   - `parse_param_range` / `classify_bare_param` / `parse_header_range`
+     가 segment 가 `"="` 하나거나 empty-key 일 때 `("", "")` 를 push.
+   - Display 는 key 빈 param 을 `;` 하나로 출력 → 재parse 가 `trim_sp_tab` 후
+     early-return 하여 entry 생성 안 함. 비대칭.
+   - 예: `";="` → 첫 parse 는 param=[("","")], 재 parse 는 param=[].
+
+3. **RC3: 구조문자 `<` / `>` 가 host 에 저장**
+   - fallback scheme 경로에서 host 가 임의 바이트를 그대로 수용.
+   - Address Display 가 `<...>` 로 wrap 할 때 host 안의 `>` 가 조기 종료 지점
+     으로 오해됨.
+   - 예: host=`">"` → Address 출력 `"<sip:>>"` → 재 parse 가 첫 `>` 에서 끊어
+     address param 을 생성하며 `;` 삽입.
+
+4. **RC4: header 경로의 empty entry + key 내 `?` 포함**
+   - RC2 의 header 변형. 값 없는 header 가 `?=` 로 재렌더되는 원인.
+   - 또한 param key 에 `?` 가 들어가는 경우 (fallback scheme + 임의 입력) 재 parse
+     시 `?` 가 header 시작으로 재해석.
+
+### 수정 방침
+
+- RC1 → `parse_host_port_range` 입구에서 `trim_ws` 로 host 경계 정규화.
+- RC2 → 세 파서 모두 **trim 후 key-span 이 비어있으면 skip**.
+- RC3 → host 에 `<` / `>` 가 들어오면 `ParseError::InvalidHost` 반환.
+- RC4 → RC2 fix 로 자연 해소 예상. 잔여 시 parse_header_range 쪽 reject 추가.
+
+이 수정들은 기존 parity 테스트 (21개) 를 깨지 않는 범위에서 적용해야 함:
+- `scheme_detection_falls_back_to_sip` 은 유지 (단순 `alice@host` 는 여전히 Ok)
+- `empty_input_is_empty_sip_uri` 유지
+- `trailing_semicolon_in_params_is_tolerated` 유지 (empty-key skip 이 강화판)
+
+round-2 fuzz 로 crashes=0 확인이 수정 완료 기준.
+
+### Round-2 결과 (2026-04-19, fix 적용 후)
+
+두 target 모두 **60초 × `-ignore_crashes=1` × fork=1 에서 crashes=0**.
+
+| target  | iterations | coverage | corpus | crashes |
+|---------|------------|----------|--------|---------|
+| uri     | 5.78 M     | 947 / ft 3586 | 1155 | 0 |
+| address | 4.72 M     | 1243 / ft 4951 | 1495 | 0 |
+
+기존 parity 테스트 35개 전부 통과 (21 uri + 11 address + 3 roundtrip).
+
+적용된 수정:
+- `src/uri.rs` — `parse_host_port_range` 가 `Result` 반환, host edges
+  trim_ws, `<`/`>`/`[`/`]`/ws 거부; `parse_param_range` / `parse_header_range`
+  가 `Result` 반환, key/value 범위 각각 trim_ws, empty-key skip, 구조문자
+  거부; pct-decoded 결과에 `%` 또는 edge ws 있으면 `InvalidHost` 반환.
+- `src/address.rs` — `classify_bare_param` 이 `Result` 반환, key/value
+  범위 trim_ws, empty-key skip, 구조문자 거부.
+- `src/error.rs` — `ParseError::InvalidHost` 추가.
+
+### 남은 known limitation
+
+- **pct-encoding 미 재인코딩**: 현재 Display 는 pct-decoded 값을 그대로
+  출력하므로, 원 입력에 `%20` 이 interior 로 있어 decode 값에 space 가
+  섞이는 경우 — 이 crate 기준으로는 **parse 시 거부** (edge/structure
+  조건에 걸리면) 하거나 **round-trip 안정**. Ruby tsip-core 가 이 입력을
+  어떻게 처리하는지 확인 후, 필요 시 Display 에 `%` escape 만 추가하는
+  것으로 broaden 가능.
+- 한 번도 pct-decode 통과하지 않는 param key/value 는 여전히 raw `%` 허용.
+  param 은 Ruby 와 동일하게 pct-decode 안 하는 경로.
+
+### 보조 도구
+
+- `examples/cluster_crashes.rs` — `cargo run --release --example cluster_crashes -- <uri|address> <dir>`
+  로 artifact 를 round-trip 재실행하여 실패 signature 별로 cluster 해 상위 20개
+  출력. 대량 crash 의 수동 분류 없이 root cause 추적에 사용.
+
+---
+
 ## 끝
 
 이 문서는 크레이트 신규 구현 세션의 진입점. 1 section ~ 5 section 을 우선

@@ -186,6 +186,23 @@ impl Uri {
         })
     }
 
+    /// Parse a single `key[=value]` param segment (as produced by splitting a
+    /// URI body on `;`) into `target`. Public entry point over
+    /// [`parse_param_range`] so external bindings can feed one segment at a
+    /// time — used by tsip-core's `Via.parse` which has already split the
+    /// header into params before reaching the URI crate.
+    pub fn parse_param(raw: &str, target: &mut Vec<(String, String)>) -> Result<(), ParseError> {
+        parse_param_range(raw, 0, raw.len(), target)
+    }
+
+    /// Parse a `host[:port]` fragment (including the bracketed-IPv6 form
+    /// `[::1]:5060`). Public entry point over [`parse_host_port_range`] so
+    /// external bindings can reuse the scanner without re-implementing the
+    /// IPv6 / last-colon heuristics.
+    pub fn parse_host_port(hp: &str) -> Result<(String, Option<u16>), ParseError> {
+        parse_host_port_range(hp, 0, hp.len())
+    }
+
     pub fn transport(&self) -> String {
         for (k, v) in &self.params {
             if k == "transport" {
@@ -279,10 +296,10 @@ impl Uri {
         }
         for (k, v) in &self.params {
             buf.push(';');
-            buf.push_str(k);
+            append_param_escaped(buf, k);
             if !v.is_empty() {
                 buf.push('=');
-                buf.push_str(v);
+                append_param_escaped(buf, v);
             }
         }
         if !self.headers.is_empty() {
@@ -370,14 +387,9 @@ pub(crate) fn parse_param_range(
     } else {
         (downcase_str(input, k_from, k_to), String::new())
     };
-    // Params are stored literally (no pct-decode), so structural bytes that
-    // would re-tokenize on re-parse must be rejected at parse time. `>` is
-    // the only byte that breaks Address wrapping (it terminates the `<...>`
-    // slice on re-parse); `<` is safe because the scanner finds the true
-    // closing `>` after it.
-    if key.as_bytes().contains(&GT) || val.as_bytes().contains(&GT) {
-        return Err(ParseError::InvalidHost);
-    }
+    // Params are stored literally (no pct-decode). Structural bytes like `>`,
+    // `;`, `?`, `=` are not rejected here — `Uri::append_to` escapes them on
+    // render so the fixed point still holds after one cycle of case folding.
     upsert(target, key, val);
     Ok(())
 }
@@ -514,6 +526,7 @@ fn validate_host(host: &str) -> Result<(), ParseError> {
 }
 
 const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
 /// Escape bytes of a pct-decoded field (userinfo, header key/value) so that
 /// render+re-parse reaches a fixed point. Covers Address brackets, URI-level
@@ -532,6 +545,33 @@ fn append_pct_escaped(buf: &mut String, src: &str) {
                 buf.push('%');
                 buf.push(HEX_UPPER[(b >> 4) as usize] as char);
                 buf.push(HEX_UPPER[(b & 0x0F) as usize] as char);
+            }
+            _ => buf.push(ch),
+        }
+    }
+}
+
+/// Escape bytes of a param key/value on render. Params are stored literally
+/// (no pct-decode on parse), so only the bytes that would re-tokenize the
+/// URI body on re-parse need escaping: `;` (param separator), `?` (params →
+/// headers boundary), `&` (header separator — conservative), `=` (key/value
+/// separator), and `<`/`>` (Address wrapping). `%` is not escaped because
+/// params are not pct-decoded; escaping it would turn stored `%3c` into
+/// `%253c` on re-render and break the fixed point. Whitespace is not escaped
+/// because the param-segment trim_ws does not strip interior ws and
+/// `parse_param_range` re-stores leading value ws verbatim.
+///
+/// Hex digits are emitted lowercase so that re-parse of the rendered output
+/// (which `downcase_str`s param keys) round-trips to the same byte pattern
+/// in one cycle.
+fn append_param_escaped(buf: &mut String, src: &str) {
+    for ch in src.chars() {
+        match ch {
+            ';' | '?' | '&' | '=' | '<' | '>' => {
+                let b = ch as u8;
+                buf.push('%');
+                buf.push(HEX_LOWER[(b >> 4) as usize] as char);
+                buf.push(HEX_LOWER[(b & 0x0F) as usize] as char);
             }
             _ => buf.push(ch),
         }

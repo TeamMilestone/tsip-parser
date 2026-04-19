@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.2.1 — 2026-04-19
+
+### Fixed
+
+- `sip:alice@host;<evil>=1` and other URI-level param key/values containing
+  `>`, `;`, `?`, `&`, `=`, or `<` are now accepted. The parse-time
+  `InvalidHost` rejection for `>` was removed; `Uri::append_to` escapes these
+  bytes with lowercase pct-encoding on render so the stored byte cannot
+  re-tokenize the URI body or terminate an Address `<...>` wrapper on
+  re-parse. Closes the last xoracle parity case (#13) vs the Ruby tsip-core
+  reference.
+
+### Added
+
+- `Uri::parse_range(src, from, to)` was already public; two more class-method
+  entry points join it for FFI bindings (tsip-core's `TsipCore::Sip::Uri =
+  TsipParser::Uri` class alias):
+  - `Uri::parse_param(raw, &mut Vec<(String, String)>)` — parse one
+    `key[=value]` segment as produced by splitting a URI body on `;`.
+  - `Uri::parse_host_port(&str)` — parse a `host[:port]` fragment
+    (including the bracketed-IPv6 form `[::1]:5060`). Returns
+    `(String, Option<u16>)`.
+
+### Internal
+
+- Render-side escape set for URI-level params: `; ? & = < >`. `%` and
+  whitespace are *not* escaped — params are stored literally (no pct-decode
+  on parse), so escaping `%` would break the fixed point and `parse_param_range`
+  already preserves leading value whitespace verbatim.
+- Lowercase hex (`%3c`, `%3e`, ...) is emitted for param escapes so the
+  re-parse (which `downcase_str`s keys) reaches a fixed point in one cycle
+  rather than two. Header/userinfo escape continues to use uppercase hex
+  because those fields pct-decode on parse.
+- Fuzz: `uri` 9.36M runs / 121s / crashes=0; `address` 8.95M runs / 121s /
+  crashes=0.
+- Bench (vs v0.2.0): `uri_to_string_typical` +13.9% (expected — per-char
+  scan added to param render). `uri_parse_*` within ±7%. All within the
+  ±20% tolerance set by the handoff.
+
 ## 0.2.0 — 2026-04-19
 
 ### Breaking

@@ -213,23 +213,38 @@ fn escapes_pct_decoded_cr_in_header_key() {
 }
 
 #[test]
-fn accepts_lt_but_rejects_gt_in_param_key() {
-    // `<` in a param key is permissive — it survives round-trip even when the
-    // URI is wrapped in `<...>` by an Address, because the scanner still finds
-    // the true closing `>` afterwards.
+fn accepts_lt_and_gt_in_param_via_render_escape() {
+    // `<` and `>` in a param key/value are accepted. The renderer escapes
+    // both (along with `; ? & =`) so a stored `>` cannot prematurely
+    // terminate the Address `<...>` wrapper on re-parse.
+    let u = Uri::parse("sip:alice@host;<evil>=1").unwrap();
+    assert_eq!(u.params, vec![("<evil>".into(), "1".into())]);
+
+    let rendered = u.to_string();
+    assert!(
+        rendered.contains("%3c") && rendered.contains("%3e"),
+        "expected < and > to be escaped in {}",
+        rendered
+    );
+
+    // Re-parse must succeed. Key is now pct-escaped-then-downcased so the
+    // stored form differs on cycle 1, but cycle 2 reaches a fixed point.
+    let u2 = Uri::parse(&rendered).unwrap();
+    assert_eq!(u2.to_string(), rendered);
+
+    // Direct `>` in key/value: also accepted, also escaped.
+    let u3 = Uri::parse("sip:alice@host;foo>=1").unwrap();
+    assert!(u3.to_string().contains("%3e"));
+    let u4 = Uri::parse("sip:alice@host;foo=>").unwrap();
+    assert!(u4.to_string().contains("%3e"));
+}
+
+#[test]
+fn accepts_lt_in_param_key_without_escape_needed_to_parse() {
+    // `<` alone (no matching `>`) still parses — render escapes it but
+    // re-parse of unescaped `<` also works.
     let u = Uri::parse("sip:alice@host;<foo=1").unwrap();
     assert_eq!(u.params, vec![("<foo".into(), "1".into())]);
-
-    // `>` in a param key/value is rejected: a stored `>` would terminate the
-    // `<...>` wrapper prematurely on Address re-parse, breaking round-trip.
-    assert_eq!(
-        Uri::parse("sip:alice@host;foo>=1").unwrap_err(),
-        ParseError::InvalidHost
-    );
-    assert_eq!(
-        Uri::parse("sip:alice@host;foo=>").unwrap_err(),
-        ParseError::InvalidHost
-    );
 }
 
 #[test]
